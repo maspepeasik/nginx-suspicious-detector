@@ -15,15 +15,8 @@ Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Ngin
   5. `Akses File Sensitif` (`.env`, `.git`, dll) ➔ **Threshold Ban**
 - **⏱️ Sistem Threshold Fleksibel**: Mencegah *false positive* pada akses file sensitif dengan aturan batas (contoh: hanya memblokir jika IP mencoba minimal **2 kali dalam 5 detik**).
 - **🌐 Deteksi Domain Target**: Otomatis mengekstrak nama domain yang diserang (baik dari header Host Nginx maupun Referer URL).
-- **📢 Notifikasi Telegram Lengkap**: Mengirimkan alert komprehensif ke bot Telegram dengan rincian:
-  - 🛑 IP Terblokir
-  - 🌐 Domain Target
-  - 🎯 Method & Path URL
-  - 📊 Status Code HTTP
-  - ⏱️ Durasi Ban
-  - ⚠️ Kategori Serangan
-  - 🔍 Payload Spesifik yang Tertangkap
-  - 📝 Baris Log Pemicu
+- **📢 Notifikasi Telegram Lengkap**: Mengirimkan alert komprehensif ke bot Telegram dengan rincian lengkap (IP, Domain, Method/Path, Status Code, Durasi Ban, Kategori, Payload, dan Baris Log).
+- **🔁 Persistent Attack Alert (IP Sudah Terblokir)**: Jika sebuah IP yang statusnya sudah terblokir di Fail2ban masih terus mencoba menyerang, bot akan menghitung percobaannya dan mengirimkan notifikasi khusus setiap kelipatan **2 kali percobaan** (dapat diatur via `BANNED_REPEAT_INTERVAL` di `.env`).
 - **🛡️ Whitelist IP Internal**: IP terpercaya (localhost, jaringan LAN/VPN, IP admin) kebal pemblokiran di level script maupun fail2ban.
 - **🔐 Hak Akses Fleksibel**: Dijalankan secara *headless* via Systemd sebagai `root` (tanpa password prompt), dengan dukungan opsional `SUDO_PASSWORD` jika dijalankan secara manual oleh user non-root.
 - **⚙️ Konfigurasi Standar `.env`**: Seluruh variabel sensitif (Token Telegram, Jail Name, Whitelist, Threshold) dikelola melalui file `.env`.

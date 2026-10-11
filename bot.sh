@@ -7,13 +7,11 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
 CONFIG_FILE="${SCRIPT_DIR}/.env"
-if [[ ! -f "$CONFIG_FILE" ]]; then echo "[!] Error: File .env tidak ditemukan! Silakan salin dari .env.example"; exit 1; fi
-if [[ -f "$CONFIG_FILE" ]]; then
-    source "$CONFIG_FILE"
-else
-    echo "[!] Error: File konfigurasi $CONFIG_FILE tidak ditemukan!"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[!] Error: File .env tidak ditemukan! Silakan salin dari .env.example"
     exit 1
 fi
+source "$CONFIG_FILE"
 
 TARGET_LOGS="${LOG_FILES:-$LOG_FILE}"
 [[ -z "$TARGET_LOGS" ]] && TARGET_LOGS="/var/log/nginx/access.log"
@@ -24,6 +22,9 @@ PATTERN_XSS="${PATTERN_XSS:-${SCRIPT_DIR}/patterns_xss.txt}"
 PATTERN_TRAVERSAL="${PATTERN_TRAVERSAL:-${SCRIPT_DIR}/patterns_traversal.txt}"
 PATTERN_RCE="${PATTERN_RCE:-${SCRIPT_DIR}/patterns_rce.txt}"
 PATTERN_SENSITIVE="${PATTERN_SENSITIVE:-${SCRIPT_DIR}/patterns_sensitive.txt}"
+
+# Interval alert untuk IP yang sudah diban tapi masih mencoba menyerang
+REPEAT_INTERVAL="${BANNED_REPEAT_INTERVAL:-2}"
 
 # Helper untuk eksekusi perintah root (Mendukung Systemd Root, Sudo Password, atau Passwordless)
 run_as_root() {
@@ -36,7 +37,7 @@ run_as_root() {
     fi
 }
 
-# Stream log Nginx
+# Stream log Nginx (Mendukung multi-log & quiet mode)
 stream_logs() {
     if [[ $EUID -eq 0 ]]; then
         tail -F -q -n 0 $TARGET_LOGS 2>/dev/null
@@ -61,7 +62,7 @@ REGEX_TRAVERSAL=$(build_regex "$PATTERN_TRAVERSAL")
 REGEX_RCE=$(build_regex "$PATTERN_RCE")
 REGEX_SENSITIVE=$(build_regex "$PATTERN_SENSITIVE")
 
-# Fungsi Kirim Notifikasi Telegram
+# Fungsi Kirim Notifikasi Telegram untuk Ban Baru
 send_telegram() {
     local ip="$1"
     local category="$2"
@@ -93,6 +94,45 @@ send_telegram() {
     fi
 }
 
+# Fungsi Kirim Notifikasi Telegram untuk Percobaan Berulang dari IP yang Sudah di-Ban
+send_telegram_repeat() {
+    local ip="$1"
+    local category="$2"
+    local logline="$3"
+    local payload="$4"
+    local domain="$5"
+    local method="$6"
+    local path_url="$7"
+    local status_code="$8"
+    local attempt="$9"
+    
+    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        local text="🚫 <b>PERSISTENT ATTACK ALERT (IP SUDAH DIBLOKIR)</b> 🚫
+
+🛑 <b>IP Penyerang:</b> <code>$ip</code> (Status: Aktif Terblokir)
+🔢 <b>Percobaan Berulang:</b> Percobaan ke-$attempt
+🌐 <b>Domain:</b> <code>$domain</code>
+🎯 <b>Method & Path:</b> <code>$method $path_url</code>
+📊 <b>Status Code:</b> <code>$status_code</code>
+⏱️ <b>Status Ban:</b> Masih Terblokir via Fail2ban
+⚠️ <b>Kategori Serangan:</b> <b>$category</b>
+🔍 <b>Payload Terdeteksi:</b> <code>$payload</code>
+
+📝 <b>Log Pemicu:</b>
+<code>$logline</code>"
+
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${text}" \
+            -d parse_mode="HTML" > /dev/null 2>&1
+    fi
+}
+
+# State pelacak
+declare -A SENSITIVE_COUNT
+declare -A SENSITIVE_TIME
+declare -A BANNED_REPEAT_COUNT
+
 # Fungsi Eksekusi Ban
 ban_ip() {
     local ip="$1"
@@ -116,26 +156,30 @@ ban_ip() {
     if [[ $is_whitelisted -eq 1 ]]; then
         echo "[-] IP $ip terdeteksi ($category), tapi masuk WHITELIST. (Abaikan)"
     else
-        echo "[!] BAN TRIGGERED: IP $ip | $category | Domain: $domain"
-        
         result=$(run_as_root fail2ban-client set "$JAIL_NAME" banip "$ip" 2>/dev/null)
         
         if [[ "$result" == "1" ]]; then
-            echo "[*] IP $ip berhasil diban."
+            echo "[!] BAN BARU: IP $ip | $category | Domain: $domain"
+            BANNED_REPEAT_COUNT["$ip"]=0
             send_telegram "$ip" "$category" "$logline" "$payload" "$domain" "$method" "$path_url" "$status_code"
         elif [[ "$result" == "0" ]]; then
-            echo "[*] IP $ip sudah dalam status ban."
+            BANNED_REPEAT_COUNT["$ip"]=$(( ${BANNED_REPEAT_COUNT["$ip"]:-0} + 1 ))
+            local current_attempt=${BANNED_REPEAT_COUNT["$ip"]}
+            
+            echo "[*] IP $ip sudah dalam status ban. Percobaan pasca-ban ke-$current_attempt (Alert setiap $REPEAT_INTERVAL kali)"
+            
+            # Kirim notifikasi jika mencapai kelipatan interval percobaan
+            if (( current_attempt % REPEAT_INTERVAL == 0 )); then
+                echo "[!] Mengirim notifikasi percobaan berulang ke-$current_attempt untuk IP $ip ke Telegram..."
+                send_telegram_repeat "$ip" "$category" "$logline" "$payload" "$domain" "$method" "$path_url" "$status_code" "$current_attempt"
+            fi
         else
             echo "[!] Gagal melakukan ban terhadap IP $ip."
         fi
     fi
 }
 
-echo "[*] Auto-Ban Bot berjalan..."
-
-# State untuk Threshold File Sensitif
-declare -A SENSITIVE_COUNT
-declare -A SENSITIVE_TIME
+echo "[*] Auto-Ban Bot berjalan dengan deteksi serangan berulang..."
 
 stream_logs | while read -r line; do
     IP=$(echo "$line" | awk '{print $1}')
@@ -157,14 +201,12 @@ stream_logs | while read -r line; do
     [[ -z "$STATUS_CODE" ]] && STATUS_CODE="-"
     
     # Ekstraksi Domain
-    # 1. Cek dari field host di akhir log (jika Nginx mencatat "$host")
     LAST_QUOTE=$(echo "$line" | awk -F'"' '{print $(NF-1)}')
     DOMAIN=""
     if [[ -n "$LAST_QUOTE" && "$LAST_QUOTE" != "-" && ! "$LAST_QUOTE" =~ [[:space:]] && "$LAST_QUOTE" =~ \. ]]; then
         DOMAIN="$LAST_QUOTE"
     fi
     
-    # 2. Jika belum dapat, cek dari Referer
     if [[ -z "$DOMAIN" ]]; then
         REFERER_DOMAIN=$(echo "$line" | grep -oP 'https?://\K[^/"\s:]+' | head -n 1)
         if [[ -n "$REFERER_DOMAIN" ]]; then
@@ -172,7 +214,6 @@ stream_logs | while read -r line; do
         fi
     fi
     
-    # 3. Fallback jika tidak ditemukan
     [[ -z "$DOMAIN" ]] && DOMAIN="Direct Access (No Host Header)"
     
     # ==========================================================
