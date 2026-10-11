@@ -1,0 +1,26 @@
+# Akses File Sensitif (Threshold 2x dalam 5 detik)
+\.env
+\.git
+\.svn
+\.bak
+\.backup
+\.sql
+\.tar\.gz
+\.zip
+config\.php
+wp-config\.php
+id_rsa
+id_dsa
+\.ssh/
+phpinfo\.php
+web\.config
+\.htaccess
+\.htpasswd
+docker-compose\.ya?ml
+Dockerfile
+database\.sqlite
+dump\.sql
+\.DS_Store
+credentials\.json
+secret\.key
+\.bash_history

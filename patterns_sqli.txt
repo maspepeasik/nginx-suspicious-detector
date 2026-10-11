@@ -1,0 +1,38 @@
+# SQL Injection (SQLi) - Dari FuzzLists & Standard Payloads
+%20and%201='1
+%20OR%201=1
+UNION%20SELECT
+UNION%20ALL%20SELECT
+%27%20OR%20%271%27=%271
+%22%20OR%20%221%22=%221
+SLEEP\(
+BENCHMARK\(
+information_schema
+load_file\(
+extractvalue\(
+updatexml\(
+' OR 1=1
+" OR 1=1
+' UNION SELECT
+" UNION SELECT
+waitfor%20delay
+waitfor delay
+pg_sleep\(
+pg_sleep%28
+benchmark%28
+sleep%28
+group%20by.*having%201=1
+having%201=1
+having 1=1
+or%200=0
+or 0=0
+or%20true
+or true
+' AND 1=0 UNION
+" AND 1=0 UNION
+%27%20and%201=%271
+%27%20and%20a=%27a
+admin'%20--
+admin"%20--
+admin'/*
+admin"/*
