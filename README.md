@@ -1,6 +1,6 @@
 # 🛡️ Nginx Auto-Ban Suspicious Bot (via Fail2ban)
 
-Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Nginx secara *real-time*. Bot ini mendeteksi upaya eksploitasi web (SQLi, XSS, Path Traversal, RCE, dan pencarian file sensitif), mengekstrak IP penyerang, memblokirnya secara otomatis via **Fail2ban** selama 7 hari, serta mengirimkan notifikasi lengkap ke **Telegram**.
+Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Nginx secara *real-time*. Bot ini mendeteksi upaya eksploitasi web (SQLi, XSS, Path Traversal, RCE, dan pencarian file sensitif), mengekstrak IP penyerang, memblokirnya secara otomatis via **Fail2ban** selama 7 hari, memantau error HTTP 4xx/5xx (notifikasi saja), serta mengirimkan notifikasi lengkap ke **Telegram** dengan waktu standar lokal (WIB).
 
 ---
 
@@ -15,12 +15,14 @@ Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Ngin
   5. `Akses File Sensitif` (`.env`, `.git`, dll) ➔ **Threshold Ban**
 - **⏱️ Sistem Threshold Fleksibel**: Mencegah *false positive* pada akses file sensitif dengan aturan batas (contoh: hanya memblokir jika IP mencoba minimal **2 kali dalam 5 detik**).
 - **🌐 Deteksi Domain Target**: Otomatis mengekstrak nama domain yang diserang (baik dari header Host Nginx maupun Referer URL).
-- **📢 Notifikasi Telegram Lengkap**: Mengirimkan alert komprehensif ke bot Telegram dengan rincian lengkap (IP, Domain, Method/Path, Status Code, Durasi Ban, Kategori, Payload, dan Baris Log).
-- **⚠️ Notifikasi HTTP Error (4xx & 5xx - Notif Only)**: Memantau dan mengirimkan alert real-time jika terdeteksi respon error HTTP 4xx (Client Error seperti 403, 404) atau 5xx (Server Error seperti 500, 502) dengan format identik ("The Watcher"), **tanpa melakukan pemblokiran IP (notif only)**.
-- **🔁 Persistent Attack Alert (IP Sudah Terblokir)**: Jika sebuah IP yang statusnya sudah terblokir di Fail2ban masih terus mencoba menyerang, bot akan menghitung percobaannya dan mengirimkan notifikasi khusus setiap kelipatan **2 kali percobaan** (dapat diatur via `BANNED_REPEAT_INTERVAL` di `.env`).
-- **🛡️ Whitelist IP Internal**: IP terpercaya (localhost, jaringan LAN/VPN, IP admin) kebal pemblokiran di level script maupun fail2ban.
+- **🕒 Format Waktu Lokal Akurat (WIB)**: Timestamp log otomatis dikonversi ke zona waktu lokal (`YYYY-MM-DD HH:MM:SS WIB`), bebas dari kebingungan selisih waktu UTC.
+- **📢 Notifikasi Telegram Komprehensif**: Mengirimkan alert langsung ke bot Telegram dengan format bersih dan informatif:
+  - **Auto-Ban Alert**: Detail lengkap saat penyerang baru diblokir (IP, Waktu, Domain, Method & Path, Status Code, Durasi Ban, Kategori Serangan, Payload yang tertangkap, dan Baris Log).
+  - **Persistent Attack Alert**: Notifikasi khusus untuk IP yang sudah terblokir tetapi masih mencoba menyerang (dikirim setiap kelipatan 2 kali percobaan).
+  - **HTTP Error Alert (4xx & 5xx)**: Notifikasi real-time jika terjadi error client (`4xx` seperti 403, 404) atau server (`5xx` seperti 500, 502) **tanpa memblokir IP (Notif Only)**.
+- **🛡️ Whitelist IP Internal**: IP terpercaya (localhost, jaringan LAN/VPN, IP admin) kebal pemblokiran di level script maupun Fail2ban.
 - **🔐 Hak Akses Fleksibel**: Dijalankan secara *headless* via Systemd sebagai `root` (tanpa password prompt), dengan dukungan opsional `SUDO_PASSWORD` jika dijalankan secara manual oleh user non-root.
-- **⚙️ Konfigurasi Standar `.env`**: Seluruh variabel sensitif (Token Telegram, Jail Name, Whitelist, Threshold) dikelola melalui file `.env`.
+- **⚙️ Konfigurasi Terpusat `.env`**: Seluruh variabel (Token Telegram, Jail Name, Whitelist, Threshold, Timezone) dikelola rapi melalui satu file `.env`.
 
 ---
 
@@ -31,13 +33,14 @@ Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Ngin
 ├── bot.service                  # Unit file systemd untuk background daemon
 ├── .env                         # Konfigurasi aktif bot (Token, Jail, Whitelist, dll)
 ├── .env.example                 # Template acuan konfigurasi
+├── README.md                    # Dokumentasi lengkap sistem
 ├── nginx-bot-jail.conf          # Konfigurasi Jail Fail2ban (/etc/fail2ban/jail.d/)
 ├── nginx-bot-dummy-filter.conf  # Filter dummy Fail2ban (/etc/fail2ban/filter.d/)
-├── patterns_sqli.txt            # Pola deteksi SQL Injection
-├── patterns_xss.txt             # Pola deteksi XSS
-├── patterns_traversal.txt       # Pola deteksi Path Traversal / LFI
-├── patterns_rce.txt             # Pola deteksi RCE / Command Injection
-└── patterns_sensitive.txt       # Pola deteksi Akses File Sensitif (.env, .git, dll)
+├── patterns_sqli.txt            # Pola deteksi SQL Injection (Instant Ban)
+├── patterns_xss.txt             # Pola deteksi XSS (Instant Ban)
+├── patterns_traversal.txt       # Pola deteksi Path Traversal / LFI (Instant Ban)
+├── patterns_rce.txt             # Pola deteksi RCE / Command Injection (Instant Ban)
+└── patterns_sensitive.txt       # Pola deteksi Akses File Sensitif (Threshold Ban)
 ```
 
 ---
@@ -45,12 +48,17 @@ Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Ngin
 ## 🚀 Panduan Instalasi & Deployment
 
 ### 1. Prasyarat Sistem
-Pastikan server Linux Anda telah terpasang:
+Pastikan server Linux Anda telah terpasang paket berikut:
 - **Nginx**
 - **Fail2ban**
 - **Systemd** & **curl**
 
-### 2. Konfigurasi Nginx Log Format (Opsional tapi Direkomendasikan)
+Atur zona waktu server ke WIB (opsional tapi disarankan):
+```bash
+sudo timedatectl set-timezone Asia/Jakarta
+```
+
+### 2. Konfigurasi Format Log Nginx (Sangat Disarankan)
 Agar Nginx selalu mencatat domain target (`$host`) bahkan saat penyerang tidak menyertakan HTTP Referer:
 Buka `/etc/nginx/nginx.conf`, tambahkan format `combined_host` pada bagian `Logging Settings`:
 ```nginx
@@ -80,9 +88,10 @@ Salin template `.env.example` menjadi `.env`:
 cp .env.example .env
 nano .env
 ```
-Sesuaikan parameter berikut:
+
+Contoh isi konfigurasi lengkap:
 ```bash
-# Path file log (bisa 1 file, spasi untuk banyak file, atau wildcard: /var/log/nginx/*access*.log)
+# Path file log Nginx (bisa 1 file, spasi untuk banyak file, atau wildcard: /var/log/nginx/*access*.log)
 LOG_FILES="/var/log/nginx/access.log"
 
 # Nama jail Fail2ban
@@ -95,9 +104,21 @@ WHITELIST_IPS="127.0.0.1 192.168.1. 10.0.0."
 THRESHOLD_LIMIT=2
 THRESHOLD_TIME=5
 
-# Notifikasi Telegram
+# Interval alert untuk IP yang sudah diban tapi masih mencoba menyerang
+BANNED_REPEAT_INTERVAL=2
+
+# Notifikasi HTTP Error (4xx & 5xx) - Notif Only (Tanpa Ban)
+NOTIFY_HTTP_ERRORS="true"
+
+# Zona Waktu Notifikasi Telegram (Default: Asia/Jakarta)
+TIMEZONE="Asia/Jakarta"
+
+# Kredensial Notifikasi Telegram
 TELEGRAM_BOT_TOKEN="YOUR_BOT_TOKEN_HERE"
 TELEGRAM_CHAT_ID="YOUR_CHAT_ID_HERE"
+
+# Password Sudo / Root (Opsional, kosongkan jika via systemd)
+SUDO_PASSWORD=""
 ```
 
 Pastikan script memiliki izin eksekusi:
@@ -106,9 +127,9 @@ chmod +x bot.sh
 ```
 
 ### 5. Pasang Sebagai Service Systemd
-Agar bot otomatis berjalan di background dan otomatis aktif saat server menyala (*boot*):
+Agar bot otomatis berjalan di background dan otomatis aktif saat server dinyalakan (*boot*):
 
-1. Sesuaikan path direktori `ExecStart` di `bot.service` dengan lokasi absolut `bot.sh` di server Anda:
+1. Sesuaikan direktori `ExecStart` di `bot.service` dengan lokasi absolut `bot.sh` di server Anda:
    ```ini
    ExecStart=/home/username/auto-ban-bot/bot.sh
    ```
@@ -118,6 +139,58 @@ Agar bot otomatis berjalan di background dan otomatis aktif saat server menyala 
    sudo systemctl daemon-reload
    sudo systemctl enable --now bot.service
    ```
+
+---
+
+## 📱 Format Notifikasi Telegram
+
+### 1. Alert Pemblokiran Baru (Auto-Ban Alert)
+```text
+🚨 AUTO-BAN ALERT 🚨
+
+🛑 IP Terblokir: 203.0.113.10
+🕒 Waktu: 2026-10-12 11:08:50 WIB
+🌐 Domain: example.com
+🎯 Method & Path: GET /login='%20or%201=1
+📊 Status Code: 404
+⏱️ Durasi Ban: 7 Hari
+⚠️ Kategori Serangan: SQL Injection (SQLi)
+🔍 Payload Terdeteksi: %20or%201=1
+
+📝 Log Pemicu:
+203.0.113.10 - - [12/Oct/2026:11:08:50 +0700] "GET /login='%20or%201=1 HTTP/1.1" 404 3005 "-" "curl/8.5.0" "example.com"
+```
+
+### 2. Alert Serangan Berulang dari IP yang Sudah Di-Ban (Persistent Attack)
+```text
+🚫 PERSISTENT ATTACK ALERT (IP SUDAH DIBLOKIR) 🚫
+
+🛑 IP Penyerang: 203.0.113.10 (Status: Aktif Terblokir)
+🕒 Waktu: 2026-10-12 11:10:15 WIB
+🔢 Percobaan Berulang: Percobaan ke-2
+🌐 Domain Target: example.com
+🎯 Method & Path: GET /etc/passwd
+📊 Status Code: 404
+⏱️ Status Ban: Masih Terblokir via Fail2ban
+⚠️ Kategori Serangan: Path Traversal / Local File Inclusion (LFI)
+🔍 Payload Terdeteksi: /etc/passwd
+
+📝 Log Pemicu:
+...
+```
+
+### 3. Alert HTTP Error 4xx / 5xx (Notif Only - Tanpa Ban)
+```text
+⚠️ NGINX 4xx ERROR DETECTED
+
+IP: 114.10.151.100
+Status HTTP: 404
+Method: GET
+Path: /halaman-tidak-ada
+Time: 2026-10-12 11:15:30 WIB
+User Agent: Mozilla/5.0...
+Domain: example.com
+```
 
 ---
 
@@ -161,6 +234,10 @@ Anda dapat menguji respon bot secara lokal atau remote:
    ```bash
    curl -I "http://IP_SERVER/.env"
    curl -I "http://IP_SERVER/.env"
+   ```
+4. **Uji HTTP 4xx (Notif Only - Tanpa Ban)**:
+   ```bash
+   curl -I "http://IP_SERVER/halaman-acak-404"
    ```
 
 *Catatan: Pastikan IP penguji tidak terdaftar di variabel `WHITELIST_IPS` saat melakukan simulasi pemblokiran.*
