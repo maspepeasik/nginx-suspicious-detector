@@ -26,6 +26,23 @@ PATTERN_SENSITIVE="${PATTERN_SENSITIVE:-${SCRIPT_DIR}/patterns_sensitive.txt}"
 # Interval alert untuk IP yang sudah diban tapi masih mencoba menyerang
 REPEAT_INTERVAL="${BANNED_REPEAT_INTERVAL:-2}"
 
+# Helper untuk memformat waktu log menjadi zona waktu lokal (WIB / Asia/Jakarta)
+format_time() {
+    local raw="$1"
+    local tz="${TIMEZONE:-Asia/Jakarta}"
+    if [[ -z "$raw" ]]; then
+        TZ="$tz" date '+%Y-%m-%d %H:%M:%S %Z'
+        return
+    fi
+    local parsed=$(echo "$raw" | sed 's|/|-|g; s|:| |')
+    local formatted=$(TZ="$tz" date -d "$parsed" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+    if [[ -n "$formatted" ]]; then
+        echo "$formatted"
+    else
+        echo "$raw"
+    fi
+}
+
 # Helper untuk eksekusi perintah root (Mendukung Systemd Root, Sudo Password, atau Passwordless)
 run_as_root() {
     if [[ $EUID -eq 0 ]]; then
@@ -72,11 +89,13 @@ send_telegram() {
     local method="$6"
     local path_url="$7"
     local status_code="$8"
+    local req_time="$9"
     
     if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         local text="🚨 <b>AUTO-BAN ALERT</b> 🚨
 
 🛑 <b>IP Terblokir:</b> <code>$ip</code>
+🕒 <b>Waktu:</b> $req_time
 🌐 <b>Domain:</b> <code>$domain</code>
 🎯 <b>Method & Path:</b> <code>$method $path_url</code>
 📊 <b>Status Code:</b> <code>$status_code</code>
@@ -105,13 +124,15 @@ send_telegram_repeat() {
     local path_url="$7"
     local status_code="$8"
     local attempt="$9"
+    local req_time="${10}"
     
     if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         local text="🚫 <b>PERSISTENT ATTACK ALERT (IP SUDAH DIBLOKIR)</b> 🚫
 
 🛑 <b>IP Penyerang:</b> <code>$ip</code> (Status: Aktif Terblokir)
+🕒 <b>Waktu:</b> $req_time
 🔢 <b>Percobaan Berulang:</b> Percobaan ke-$attempt
-🌐 <b>Domain:</b> <code>$domain</code>
+🌐 <b>Domain Target:</b> <code>$domain</code>
 🎯 <b>Method & Path:</b> <code>$method $path_url</code>
 📊 <b>Status Code:</b> <code>$status_code</code>
 ⏱️ <b>Status Ban:</b> Masih Terblokir via Fail2ban
@@ -121,6 +142,39 @@ send_telegram_repeat() {
 📝 <b>Log Pemicu:</b>
 <code>$logline</code>"
 
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${text}" \
+            -d parse_mode="HTML" > /dev/null 2>&1
+    fi
+}
+
+# Fungsi Kirim Notifikasi Telegram untuk Error HTTP 4xx & 5xx (Notif Only, Tanpa Ban)
+send_http_error_telegram() {
+    local ip="$1"
+    local status_code="$2"
+    local method="$3"
+    local path_url="$4"
+    local req_time="$5"
+    local user_agent="$6"
+    local domain="$7"
+    
+    local title="⚠️ NGINX 4xx ERROR DETECTED"
+    if [[ "$status_code" =~ ^5 ]]; then
+        title="🚨 NGINX 5xx ERROR DETECTED"
+    fi
+    
+    local text="$title
+
+<b>IP:</b> $ip
+<b>Status HTTP:</b> $status_code
+<b>Method:</b> $method
+<b>Path:</b> $path_url
+<b>Time:</b> $req_time
+<b>User Agent:</b> $user_agent
+<b>Domain:</b> $domain"
+
+    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${text}" \
@@ -143,6 +197,7 @@ ban_ip() {
     local method="$6"
     local path_url="$7"
     local status_code="$8"
+    local req_time="$9"
     
     # Cek Whitelist IP
     local is_whitelisted=0
@@ -161,17 +216,16 @@ ban_ip() {
         if [[ "$result" == "1" ]]; then
             echo "[!] BAN BARU: IP $ip | $category | Domain: $domain"
             BANNED_REPEAT_COUNT["$ip"]=0
-            send_telegram "$ip" "$category" "$logline" "$payload" "$domain" "$method" "$path_url" "$status_code"
+            send_telegram "$ip" "$category" "$logline" "$payload" "$domain" "$method" "$path_url" "$status_code" "$req_time"
         elif [[ "$result" == "0" ]]; then
             BANNED_REPEAT_COUNT["$ip"]=$(( ${BANNED_REPEAT_COUNT["$ip"]:-0} + 1 ))
             local current_attempt=${BANNED_REPEAT_COUNT["$ip"]}
             
             echo "[*] IP $ip sudah dalam status ban. Percobaan pasca-ban ke-$current_attempt (Alert setiap $REPEAT_INTERVAL kali)"
             
-            # Kirim notifikasi jika mencapai kelipatan interval percobaan
             if (( current_attempt % REPEAT_INTERVAL == 0 )); then
                 echo "[!] Mengirim notifikasi percobaan berulang ke-$current_attempt untuk IP $ip ke Telegram..."
-                send_telegram_repeat "$ip" "$category" "$logline" "$payload" "$domain" "$method" "$path_url" "$status_code" "$current_attempt"
+                send_telegram_repeat "$ip" "$category" "$logline" "$payload" "$domain" "$method" "$path_url" "$status_code" "$current_attempt" "$req_time"
             fi
         else
             echo "[!] Gagal melakukan ban terhadap IP $ip."
@@ -179,7 +233,7 @@ ban_ip() {
     fi
 }
 
-echo "[*] Auto-Ban Bot berjalan dengan deteksi serangan berulang..."
+echo "[*] Auto-Ban Bot berjalan dengan deteksi serangan dan monitoring error 4xx/5xx..."
 
 stream_logs | while read -r line; do
     IP=$(echo "$line" | awk '{print $1}')
@@ -216,12 +270,20 @@ stream_logs | while read -r line; do
     
     [[ -z "$DOMAIN" ]] && DOMAIN="Direct Access (No Host Header)"
     
+    # Ekstraksi Timestamp & Format ke Waktu Lokal (WIB)
+    RAW_TIME=$(echo "$line" | grep -oP '\[\K[^\]]+')
+    REQ_TIME=$(format_time "$RAW_TIME")
+    
+    # Ekstraksi User Agent
+    USER_AGENT=$(echo "$line" | awk -F'"' '{print $6}')
+    [[ -z "$USER_AGENT" || "$USER_AGENT" == "-" ]] && USER_AGENT="-"
+
     # ==========================================================
     # 1. Kategori: SQL Injection (SQLi) -> INSTANT BAN
     # ==========================================================
     if [[ -n "$REGEX_SQLI" ]] && echo "$line" | grep -a -E -q -i "($REGEX_SQLI)"; then
         MATCHED=$(echo "$line" | grep -a -o -E -i "($REGEX_SQLI)" | head -n 1)
-        ban_ip "$IP" "SQL Injection (SQLi)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE"
+        ban_ip "$IP" "SQL Injection (SQLi)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE" "$REQ_TIME"
         continue
     fi
     
@@ -230,7 +292,7 @@ stream_logs | while read -r line; do
     # ==========================================================
     if [[ -n "$REGEX_XSS" ]] && echo "$line" | grep -a -E -q -i "($REGEX_XSS)"; then
         MATCHED=$(echo "$line" | grep -a -o -E -i "($REGEX_XSS)" | head -n 1)
-        ban_ip "$IP" "Cross-Site Scripting (XSS)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE"
+        ban_ip "$IP" "Cross-Site Scripting (XSS)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE" "$REQ_TIME"
         continue
     fi
     
@@ -239,7 +301,7 @@ stream_logs | while read -r line; do
     # ==========================================================
     if [[ -n "$REGEX_TRAVERSAL" ]] && echo "$line" | grep -a -E -q -i "($REGEX_TRAVERSAL)"; then
         MATCHED=$(echo "$line" | grep -a -o -E -i "($REGEX_TRAVERSAL)" | head -n 1)
-        ban_ip "$IP" "Path Traversal / Local File Inclusion (LFI)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE"
+        ban_ip "$IP" "Path Traversal / Local File Inclusion (LFI)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE" "$REQ_TIME"
         continue
     fi
     
@@ -248,7 +310,7 @@ stream_logs | while read -r line; do
     # ==========================================================
     if [[ -n "$REGEX_RCE" ]] && echo "$line" | grep -a -E -q -i "($REGEX_RCE)"; then
         MATCHED=$(echo "$line" | grep -a -o -E -i "($REGEX_RCE)" | head -n 1)
-        ban_ip "$IP" "Remote Code Execution (RCE)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE"
+        ban_ip "$IP" "Remote Code Execution (RCE)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE" "$REQ_TIME"
         continue
     fi
     
@@ -272,10 +334,21 @@ stream_logs | while read -r line; do
         SENSITIVE_COUNT["$IP"]=$count
         
         if [[ $count -ge $THRESHOLD_LIMIT ]]; then
-            ban_ip "$IP" "Akses File Sensitif ($count kali dalam ${THRESHOLD_TIME} detik)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE"
+            ban_ip "$IP" "Akses File Sensitif ($count kali dalam ${THRESHOLD_TIME} detik)" "$line" "$MATCHED" "$DOMAIN" "$METHOD" "$PATH_URL" "$STATUS_CODE" "$REQ_TIME"
             SENSITIVE_COUNT["$IP"]=0
+            continue
         else
             echo "[*] Warning IP $IP: Mengakses file sensitif $MATCHED ($count/$THRESHOLD_LIMIT)"
+        fi
+    fi
+
+    # ==========================================================
+    # 6. Notifikasi HTTP Error (4xx & 5xx) - NOTIF ONLY (TANPA BAN)
+    # ==========================================================
+    if [[ "${NOTIFY_HTTP_ERRORS:-true}" == "true" ]]; then
+        if [[ "$STATUS_CODE" =~ ^[45][0-9]{2}$ ]]; then
+            echo "[*] HTTP Error terdeteksi: $STATUS_CODE | $METHOD $PATH_URL dari IP $IP (Notif Only)"
+            send_http_error_telegram "$IP" "$STATUS_CODE" "$METHOD" "$PATH_URL" "$REQ_TIME" "$USER_AGENT" "$DOMAIN"
         fi
     fi
 done

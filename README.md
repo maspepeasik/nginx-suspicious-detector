@@ -16,6 +16,7 @@ Bot monitoring keamanan berbasis **Bash Script** yang memantau `access.log` Ngin
 - **⏱️ Sistem Threshold Fleksibel**: Mencegah *false positive* pada akses file sensitif dengan aturan batas (contoh: hanya memblokir jika IP mencoba minimal **2 kali dalam 5 detik**).
 - **🌐 Deteksi Domain Target**: Otomatis mengekstrak nama domain yang diserang (baik dari header Host Nginx maupun Referer URL).
 - **📢 Notifikasi Telegram Lengkap**: Mengirimkan alert komprehensif ke bot Telegram dengan rincian lengkap (IP, Domain, Method/Path, Status Code, Durasi Ban, Kategori, Payload, dan Baris Log).
+- **⚠️ Notifikasi HTTP Error (4xx & 5xx - Notif Only)**: Memantau dan mengirimkan alert real-time jika terdeteksi respon error HTTP 4xx (Client Error seperti 403, 404) atau 5xx (Server Error seperti 500, 502) dengan format identik ("The Watcher"), **tanpa melakukan pemblokiran IP (notif only)**.
 - **🔁 Persistent Attack Alert (IP Sudah Terblokir)**: Jika sebuah IP yang statusnya sudah terblokir di Fail2ban masih terus mencoba menyerang, bot akan menghitung percobaannya dan mengirimkan notifikasi khusus setiap kelipatan **2 kali percobaan** (dapat diatur via `BANNED_REPEAT_INTERVAL` di `.env`).
 - **🛡️ Whitelist IP Internal**: IP terpercaya (localhost, jaringan LAN/VPN, IP admin) kebal pemblokiran di level script maupun fail2ban.
 - **🔐 Hak Akses Fleksibel**: Dijalankan secara *headless* via Systemd sebagai `root` (tanpa password prompt), dengan dukungan opsional `SUDO_PASSWORD` jika dijalankan secara manual oleh user non-root.
